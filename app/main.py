@@ -7,8 +7,9 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 
 from .bidi import RiskLevel, parse_bidi
+from .compare import compare_audits
 from .database import count_audits, get_audit, init_db, insert_audit, query_audits
-from .schemas import AuditRequest
+from .schemas import AuditRequest, CompareRequest
 
 app = FastAPI(
     title="Unicode Bidi Text Security Audit API",
@@ -42,6 +43,23 @@ def create_audit(payload: AuditRequest) -> dict:
     )
     return {"id": audit_id, "risk_level": result["risk_level"],
             "stored": True, "result": result}
+
+
+@app.post("/api/v1/audits/compare")
+def compare_records(payload: CompareRequest) -> dict:
+    """Compare two stored audit records as a before/after regression."""
+    if payload.before_id == payload.after_id:
+        raise HTTPException(
+            status_code=422,
+            detail="before_id and after_id must reference different records",
+        )
+    before = get_audit(payload.before_id)
+    if before is None:
+        raise HTTPException(status_code=404, detail="before audit record not found")
+    after = get_audit(payload.after_id)
+    if after is None:
+        raise HTTPException(status_code=404, detail="after audit record not found")
+    return compare_audits(before, after)
 
 
 @app.get("/api/v1/audits")
@@ -78,6 +96,7 @@ def root() -> dict:
         "docs": "/docs",
         "endpoints": [
             "POST /api/v1/audits",
+            "POST /api/v1/audits/compare",
             "GET  /api/v1/audits",
             "GET  /api/v1/audits/{id}",
             "GET  /health",

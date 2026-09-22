@@ -182,6 +182,131 @@ curl 'http://localhost:8000/api/v1/audits?risk_level=critical&filename=patch&lim
 
 返回摘要、原始文本 `raw_text` 和完整解析结果 `result`。
 
+### `POST /api/v1/audits/compare` — 结果回归比较
+
+把两条**已存储**的审计记录作为 before / after 做回归比较。控制符按
+**缩写 + 出现次序**配对（例如 before 的第 2 个 RLO 对 after 的第 2 个 RLO），
+多出来的出现次数分别计入新增 / 消失。
+
+请求体：
+
+```json
+{
+  "before_id": 7,
+  "after_id": 12
+}
+```
+
+Docker Compose 启动后直接调用（先 `docker compose up --build`）：
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/audits/compare \
+  -H 'Content-Type: application/json' \
+  -d '{"before_id": 7, "after_id": 12}' | jq
+```
+
+响应（节选）：
+
+```json
+{
+  "before_id": 7,
+  "after_id": 12,
+  "changed": true,
+  "risk": {
+    "before": "high",
+    "after": "critical",
+    "changed": true,
+    "direction": "escalated",
+    "order_delta": 1
+  },
+  "error_count": {"before": 0, "after": 1, "changed": true, "delta": 1},
+  "control_changes": {
+    "added": [
+      {
+        "abbreviation": "PDF",
+        "occurrence": 1,
+        "control": {
+          "codepoint": "U+202C",
+          "abbreviation": "PDF",
+          "logical_index": 8,
+          "position": {"line": 1, "column": 9},
+          "scope_end": null,
+          "paired_with": "U+202E",
+          "is_orphan": false
+        }
+      }
+    ],
+    "removed": [],
+    "position_changed": [
+      {
+        "abbreviation": "RLO",
+        "occurrence": 1,
+        "logical_index": {"before": 3, "after": 1, "delta": -2},
+        "position": {"before": {"line": 1, "column": 4},
+                     "after": {"line": 1, "column": 2}},
+        "before": {"codepoint": "U+202E", "logical_index": 3},
+        "after": {"codepoint": "U+202E", "logical_index": 1}
+      }
+    ],
+    "pairing_changed": [
+      {
+        "abbreviation": "RLO",
+        "occurrence": 1,
+        "scope_end": {"before": 10, "after": 12},
+        "scope_length": {"before": 7, "after": 11},
+        "paired_with": {"before": "U+202C", "after": null},
+        "is_orphan": {"before": false, "after": true}
+      }
+    ]
+  },
+  "summary": {
+    "before": {"id": 7, "created_at": 1737540000.12, "filename": "patch.diff",
+               "text_length": 12, "risk_level": "high", "max_depth": 1,
+               "error_count": 0, "control_count": 2},
+    "after": {"id": 12, "created_at": 1737626400.34, "filename": "patch.diff",
+              "text_length": 13, "risk_level": "critical", "max_depth": 1,
+              "error_count": 1, "control_count": 2}
+  }
+}
+```
+
+注：上例中 `before` / `after` 子对象是对应控制符的完整信息
+（与 `GET /api/v1/audits/{id}` 中 `result.controls[]` 同构，仅多一个
+`occurrence` 字段），节选展示时省略了其余字段。
+
+比较规则：
+
+- `control_changes.added` / `removed` — 在某一侧多出来的控制符出现（含该缩写下的第几次出现，
+  以及完整控制符信息），按文档逻辑顺序排列。
+- `position_changed` — 配对两侧的同一出现，但 `logical_index` 不同（含行列与位移 `delta`）。
+- `pairing_changed` — 配对两侧的同一出现，但 `paired_with`（配对对象）、`is_orphan`（孤立状态）
+  或影响跨度长度 `scope_length = scope_end - logical_index` 发生变化。整对控制符整体平移时
+  跨度不变，只会出现在 `position_changed` 中。
+- `risk.direction` 为 `escalated` / `de-escalated` / `unchanged`，`order_delta` 为风险级序差。
+- `summary.before` / `summary.after` 返回两侧记录的持久化摘要（id、创建时间、文件名、
+  文本长度、风险级别、最大深度、错误数、控制符数）。
+- 任一项不同则顶层 `changed` 为 `true`；两条记录的解析结果完全一致时为 `false`。
+
+错误情况：
+
+| 状态码 | 条件 |
+|---|---|
+| `404` | `before_id` 或 `after_id` 指向的记录不存在（detail 标明是哪一侧） |
+| `422` | 两个 ID 相同，或请求体字段缺失 / 非法 |
+
+在容器内执行（服务已在容器 8000 端口运行）：
+
+```bash
+docker compose exec bidi-audit python -c "
+import json, urllib.request
+req = urllib.request.Request(
+    'http://127.0.0.1:8000/api/v1/audits/compare',
+    data=json.dumps({'before_id': 7, 'after_id': 12}).encode(),
+    headers={'Content-Type': 'application/json'})
+print(json.dumps(json.load(urllib.request.urlopen(req)), ensure_ascii=False, indent=2))
+"
+```
+
 ### 其他
 
 - `GET /health` — 健康检查（容器 HEALTHCHECK 使用）
@@ -194,11 +319,15 @@ curl 'http://localhost:8000/api/v1/audits?risk_level=critical&filename=patch&lim
 ├── app/
 │   ├── __init__.py
 │   ├── bidi.py        # UAX#9 控制符解析、配对栈、风险评级、转义预览
+│   ├── compare.py     # 两条已存审计记录的回归比较（按缩写+出现次序配对）
 │   ├── database.py    # SQLite schema / CRUD / 查询
 │   ├── schemas.py     # Pydantic 请求模型
 │   ├── main.py        # FastAPI 路由
 │   └── init_db.py     # 独立初始化入口（容器启动调用）
-├── tests/test_bidi.py # 解析器单元测试 + API 冒烟测试
+├── tests/
+│   ├── conftest.py    # 共享的临时 DB / TestClient fixture
+│   ├── test_bidi.py   # 解析器单元测试 + API 冒烟测试
+│   └── test_compare.py # 回归比较接口测试（新增/消失/位移/配对范围/404/422）
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -215,7 +344,9 @@ python -m pytest tests/ -q
 
 覆盖：清洁文本、RLO 高风险、未闭合 RLO critical、LRE/PDF 配对、孤立 PDF/PDI、
 LRI/PDI 隔离配对、隔离内嵌入隐式关闭、PDF 跳过隔离层（X9）、行列定位、
-嵌套深度、转义预览，以及 API 的创建/详情/过滤/404。
+嵌套深度、转义预览，以及 API 的创建/详情/过滤/404；比较接口覆盖相同结果、
+新增/消失、仅位置平移、配对范围变化（孤立/配对对象/跨度）、按缩写与出现次序
+配对、标记配对、风险升级与错误数、以及 404 / 422 错误分支。
 
 ## 设计说明
 

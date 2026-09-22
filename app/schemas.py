@@ -23,3 +23,12 @@ class AuditCreated(BaseModel):
     risk_level: RiskLevel
     stored: bool = True
     result: dict
+
+
+class CompareRequest(BaseModel):
+    before_id: int = Field(
+        ..., ge=1, description="ID of the earlier audit record (baseline)."
+    )
+    after_id: int = Field(
+        ..., ge=1, description="ID of the later audit record (regression)."
+    )
