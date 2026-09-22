@@ -7,8 +7,9 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 
 from .bidi import RiskLevel, parse_bidi
+from .compare import compare_records
 from .database import count_audits, get_audit, init_db, insert_audit, query_audits
-from .schemas import AuditRequest
+from .schemas import AuditRequest, CompareRequest
 
 app = FastAPI(
     title="Unicode Bidi Text Security Audit API",
@@ -71,6 +72,34 @@ def read_audit(audit_id: int) -> dict:
     return record
 
 
+@app.post("/api/v1/audits/compare")
+def compare_audits(payload: CompareRequest) -> dict:
+    """Regression-diff two stored audit records.
+
+    Controls are paired by abbreviation and occurrence order; the report
+    covers added/removed controls, position and pairing-scope changes,
+    risk level and error-count deltas, with per-side summaries.
+    """
+    if payload.before_id == payload.after_id:
+        raise HTTPException(
+            status_code=422,
+            detail="before_id and after_id must refer to different records",
+        )
+    before = get_audit(payload.before_id)
+    if before is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"audit record not found: before_id={payload.before_id}",
+        )
+    after = get_audit(payload.after_id)
+    if after is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"audit record not found: after_id={payload.after_id}",
+        )
+    return compare_records(before, after)
+
+
 @app.get("/")
 def root() -> dict:
     return {
@@ -80,6 +109,7 @@ def root() -> dict:
             "POST /api/v1/audits",
             "GET  /api/v1/audits",
             "GET  /api/v1/audits/{id}",
+            "POST /api/v1/audits/compare",
             "GET  /health",
         ],
     }

@@ -11,6 +11,12 @@ from typing import Iterator, Optional
 
 DB_PATH = os.environ.get("BIDI_DB_PATH", "/data/audit.db")
 
+# Columns surfaced in audit list items and comparison-side summaries.
+SUMMARY_FIELDS = [
+    "id", "created_at", "filename", "text_length", "risk_level",
+    "max_depth", "error_count", "control_count",
+]
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS audits (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,16 +83,7 @@ def insert_audit(*, filename: Optional[str], text: str, result: dict) -> int:
 
 
 def _row_to_summary(row: sqlite3.Row) -> dict:
-    return {
-        "id": row["id"],
-        "created_at": row["created_at"],
-        "filename": row["filename"],
-        "text_length": row["text_length"],
-        "risk_level": row["risk_level"],
-        "max_depth": row["max_depth"],
-        "error_count": row["error_count"],
-        "control_count": row["control_count"],
-    }
+    return {field: row[field] for field in SUMMARY_FIELDS}
 
 
 def query_audits(

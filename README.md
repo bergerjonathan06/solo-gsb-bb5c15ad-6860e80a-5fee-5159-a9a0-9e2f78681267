@@ -182,6 +182,80 @@ curl 'http://localhost:8000/api/v1/audits?risk_level=critical&filename=patch&lim
 
 返回摘要、原始文本 `raw_text` 和完整解析结果 `result`。
 
+### `POST /api/v1/audits/compare` — 两次审计结果回归比较
+
+取两条**已存**记录（`before_id` 为基线、`after_id` 为回归版本），按
+**控制符缩写 + 出现次序**配对（如第 2 个 `RLO` 对第 2 个 `RLO`），报告：
+
+- `controls.added` / `controls.removed` — 仅出现在一侧的控制符（带所在侧视图与出现序号）；
+- `controls.paired` — 两侧配对到的控制符，逐项给出：
+  - `position_changed`：`logical_index` / 行列位置是否变化；
+  - `pairing_changed`：配对范围是否变化（`scope_end` 或 `paired_with`）；
+  - `risk_changed`、`is_orphan`、`depth_after` 等属性变化（汇总在 `changes` 数组中）；
+- `risk_level` — 整体风险级别及方向（`increased` / `decreased` / `unchanged`）；
+- `error_count` / `control_count` — 错误数与控制符总数的双侧值、差值 `delta`；
+- `before` / `after` — 两条记录的摘要（不含 `raw_text` / 完整结果）；
+- `changed` — 任一项（新增、消失、位置、配对、风险、错误数）有差异即为 `true`。
+
+错误：任一 ID 不存在返回 **404**（detail 指明是 `before_id` 还是 `after_id`）；
+两个 ID 相同返回 **422**；ID 小于 1 或缺字段同样返回 422。
+
+Docker Compose 启动后（`docker compose up --build`，端口 8000）：
+
+```bash
+# 先各提交一次审计拿到 ID，再比较
+curl -s -X POST http://localhost:8000/api/v1/audits/compare \
+  -H 'Content-Type: application/json' \
+  -d '{"before_id": 1, "after_id": 2}' | jq
+```
+
+响应示例（基线为未闭合 RLO critical，回归版本补了 PDF 变为 high）：
+
+```json
+{
+  "before_id": 1,
+  "after_id": 2,
+  "changed": true,
+  "before": {
+    "id": 1, "created_at": 1790118540.29, "filename": "v1",
+    "text_length": 4, "risk_level": "critical", "max_depth": 1,
+    "error_count": 1, "control_count": 1
+  },
+  "after": {
+    "id": 2, "created_at": 1790118540.30, "filename": "v2",
+    "text_length": 7, "risk_level": "high", "max_depth": 1,
+    "error_count": 0, "control_count": 2
+  },
+  "risk_level": {"before": "critical", "after": "high",
+                 "direction": "decreased", "changed": true},
+  "error_count": {"before": 1, "after": 0, "delta": -1, "changed": true},
+  "control_count": {"before": 1, "after": 2, "delta": 1, "changed": true},
+  "controls": {
+    "added": [
+      {"abbreviation": "PDF", "occurrence": 1,
+       "after": {"codepoint": "U+202C", "logical_index": 5,
+                 "scope_end": null, "paired_with": "U+202E",
+                 "is_orphan": false, "risk": "high"}}
+    ],
+    "removed": [],
+    "paired": [
+      {"abbreviation": "RLO", "occurrence": 1,
+       "before": {"logical_index": 0, "scope_end": 4,
+                  "paired_with": null, "is_orphan": true, "risk": "critical"},
+       "after":  {"logical_index": 1, "scope_end": 5,
+                  "paired_with": "U+202C", "is_orphan": false, "risk": "high"},
+       "changes": ["position", "pairing", "orphan", "risk"],
+       "position_changed": true,
+       "pairing_changed": true,
+       "risk_changed": true}
+    ]
+  }
+}
+```
+
+两条记录完全等价时（位置、配对、风险、错误数均一致）`changed` 为 `false`，
+`controls.paired[*].changes` 为空数组。
+
 ### 其他
 
 - `GET /health` — 健康检查（容器 HEALTHCHECK 使用）
@@ -194,11 +268,14 @@ curl 'http://localhost:8000/api/v1/audits?risk_level=critical&filename=patch&lim
 ├── app/
 │   ├── __init__.py
 │   ├── bidi.py        # UAX#9 控制符解析、配对栈、风险评级、转义预览
+│   ├── compare.py     # 两条审计记录的回归比较（缩写+出现次序配对）
 │   ├── database.py    # SQLite schema / CRUD / 查询
 │   ├── schemas.py     # Pydantic 请求模型
 │   ├── main.py        # FastAPI 路由
 │   └── init_db.py     # 独立初始化入口（容器启动调用）
-├── tests/test_bidi.py # 解析器单元测试 + API 冒烟测试
+├── tests/
+│   ├── test_bidi.py   # 解析器单元测试 + API 冒烟测试
+│   └── test_compare.py # /audits/compare 端点测试（配对/404/422）
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -215,7 +292,10 @@ python -m pytest tests/ -q
 
 覆盖：清洁文本、RLO 高风险、未闭合 RLO critical、LRE/PDF 配对、孤立 PDF/PDI、
 LRI/PDI 隔离配对、隔离内嵌入隐式关闭、PDF 跳过隔离层（X9）、行列定位、
-嵌套深度、转义预览，以及 API 的创建/详情/过滤/404。
+嵌套深度、转义预览，以及 API 的创建/详情/过滤/404；
+另含 `/audits/compare` 的新增/消失/出现次序配对、位置与配对范围变化、
+风险级别与错误数比较、双侧摘要与 `changed`，以及 404（记录不存在）和
+422（两 ID 相同、参数非法）用例。
 
 ## 设计说明
 
